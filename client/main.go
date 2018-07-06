@@ -9,6 +9,7 @@ import (
 	"os"
 	"encoding/binary"
 	"math/rand"
+	"sync"
 
 	"github.com/mami-project/plus-lib"
 )
@@ -17,6 +18,15 @@ var wOut io.Writer
 var MaxPacketSize int = 1024
 var ReadTimeout int = 5
 var Sleep int = 1
+var mutex = &sync.Mutex{}
+
+func writeString(w io.Writer, msg string) {
+	mutex.Lock()
+
+	io.WriteString(w, msg)
+
+	mutex.Unlock()
+}
 
 func main() {
 	laddr := flag.String("laddr","localhost:6138","Local address to listen on.")
@@ -31,10 +41,10 @@ func main() {
 
 	wOut = os.Stdout
 
-	io.WriteString(wOut, fmt.Sprintf("START\t%d\t%s\t%s\n", time.Now().UnixNano(), *laddr, *raddr))
+	writeString(wOut, fmt.Sprintf("START\t%d\t%s\t%s\n", time.Now().UnixNano(), *laddr, *raddr))
 
 	for {
-		io.WriteString(wOut, fmt.Sprintf("RESET\t%d\n", time.Now().UnixNano()))
+		writeString(wOut, fmt.Sprintf("RESET\t%d\n", time.Now().UnixNano()))
 
 		packetConn, err := net.ListenPacket("udp", *laddr)
 
@@ -74,7 +84,7 @@ func handleConnection(conn *PLUS.Connection) {
 
 		n, err := conn.Write(buf)
 
-		io.WriteString(wOut, fmt.Sprintf("SENT\t%d\t%d\t%s\t%d\n", cat, now, curAddr.String(), n))
+		writeString(wOut, fmt.Sprintf("SENT\t%d\t%d\t%s\t%d\n", cat, now, curAddr.String(), n))
 
 		tout := time.Now().Add(time.Duration(ReadTimeout) * time.Second)
 		conn.SetReadDeadline(tout)
@@ -83,20 +93,20 @@ func handleConnection(conn *PLUS.Connection) {
 
 		if err != nil {
 			if err == PLUS.ErrReadTimeout {
-				io.WriteString(wOut, fmt.Sprintf("TIMEOUT\t%d\t%d\t%s\n", cat, now, curAddr.String()))
+				writeString(wOut, fmt.Sprintf("TIMEOUT\t%d\t%d\t%s\n", cat, now, curAddr.String()))
 			} else {
-				io.WriteString(wOut, fmt.Sprintf("ERROR\t%d\t%d\t%s\t%q\n", cat, now, curAddr.String(), err.Error()))
+				writeString(wOut, fmt.Sprintf("ERROR\t%d\t%d\t%s\t%q\n", cat, now, curAddr.String(), err.Error()))
 			}
 			conn.Close()
 			return
 		}
 
 		if curAddr.String() != addr.String() {
-			io.WriteString(wOut, fmt.Sprintf("CHADDR\t%d\t%d\t%s\t%s\n", cat, now, curAddr.String(), addr.String()))
+			writeString(wOut, fmt.Sprintf("CHADDR\t%d\t%d\t%s\t%s\n", cat, now, curAddr.String(), addr.String()))
 			curAddr = addr
 		}
 
-		io.WriteString(wOut, fmt.Sprintf("RECV\t%d\t%d\t%s\t%d\n", cat, now, curAddr.String(), n))
+		writeString(wOut, fmt.Sprintf("RECV\t%d\t%d\t%s\t%d\n", cat, now, curAddr.String(), n))
 
 		packetNo++
 

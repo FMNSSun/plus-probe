@@ -7,12 +7,22 @@ import (
 	"io"
 	"fmt"
 	"os"
+	"sync"
 
 	"github.com/mami-project/plus-lib"
 )
 
 var wOut io.Writer
 var ReadTimeout int = 5
+var mutex = &sync.Mutex{}
+
+func writeString(w io.Writer, msg string) {
+	mutex.Lock()
+
+	io.WriteString(w, msg)
+
+	mutex.Unlock()
+}
 
 func main() {
 	laddr := flag.String("laddr","localhost:6137","Local address to listen on.")
@@ -24,7 +34,7 @@ func main() {
 
 	wOut = os.Stdout
 
-	io.WriteString(wOut, fmt.Sprintf("START\t%d\t%s\n", time.Now().UnixNano(), *laddr))
+	writeString(wOut, fmt.Sprintf("START\t%d\t%s\n", time.Now().UnixNano(), *laddr))
 
 	packetConn, err := net.ListenPacket("udp", *laddr)
 
@@ -57,23 +67,23 @@ func handleConnection(conn *PLUS.Connection) {
 
 		if err != nil {
 			if err == PLUS.ErrReadTimeout {
-				io.WriteString(wOut, fmt.Sprintf("TIMEOUT\t%d\t%d\t%s\n", cat, now, curAddr.String()))
+				writeString(wOut, fmt.Sprintf("TIMEOUT\t%d\t%d\t%s\n", cat, now, curAddr.String()))
 			} else {
-				io.WriteString(wOut, fmt.Sprintf("ERROR\t%d\t%d\t%s\t%q\n", cat, now, curAddr.String(), err.Error()))
+				writeString(wOut, fmt.Sprintf("ERROR\t%d\t%d\t%s\t%q\n", cat, now, curAddr.String(), err.Error()))
 			}
 			conn.Close()
 			return
 		}
 
 		if curAddr.String() != addr.String() {
-			io.WriteString(wOut, fmt.Sprintf("CHADDR\t%d\t%d\t%s\t%s\n", cat, now, curAddr.String(), addr.String()))
+			writeString(wOut, fmt.Sprintf("CHADDR\t%d\t%d\t%s\t%s\n", cat, now, curAddr.String(), addr.String()))
 			curAddr = addr
 		}
 
-		io.WriteString(wOut, fmt.Sprintf("RECV\t%d\t%d\t%s\t%d\n", cat, now, curAddr.String(), n))
+		writeString(wOut, fmt.Sprintf("RECV\t%d\t%d\t%s\t%d\n", cat, now, curAddr.String(), n))
 
 		n, err = conn.Write(buf[:n])
 
-		io.WriteString(wOut, fmt.Sprintf("SENT\t%d\t%d\t%s\t%d\n", cat, now, curAddr.String(), n))
+		writeString(wOut, fmt.Sprintf("SENT\t%d\t%d\t%s\t%d\n", cat, now, curAddr.String(), n))
 	}
 }
