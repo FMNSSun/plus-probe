@@ -7,8 +7,6 @@ import (
 	"io"
 	"fmt"
 	"os"
-	"encoding/binary"
-	"math/rand"
 	"sync"
 
 	"github.com/mami-project/plus-lib"
@@ -16,9 +14,11 @@ import (
 
 var wOut io.Writer
 var MaxPacketSize int = 1024
-var ReadTimeout int = 5
-var Sleep int = 1
+var ReadTimeout int
+var Sleep int
+var Burst int
 var mutex = &sync.Mutex{}
+var Cat uint64
 
 func writeString(w io.Writer, msg string) {
 	mutex.Lock()
@@ -29,15 +29,19 @@ func writeString(w io.Writer, msg string) {
 }
 
 func main() {
-	laddr := flag.String("laddr","localhost:6138","Local address to listen on.")
+	laddr := flag.String("laddr","localhost:6138","Local addresses to listen on.")
 	raddr := flag.String("raddr","localhost:6137","Remote address to connect to.")
 	readTimeout := flag.Int("read-timeout", 10, "Read timeout.")
-	sleep := flag.Int("sleep", 2, "How long to slep after sending a packet.")
+	sleep := flag.Int("sleep", 2, "How long to slep after sending packets.")
+	burst := flag.Int("burst", 3, "How many packets to burst send.")
+	cat := flag.Int("cat", 0, "CAT to use!")
 
 	flag.Parse()
 
 	ReadTimeout = *readTimeout
 	Sleep = *sleep
+	Burst = *burst
+	Cat = uint64(*cat)
 
 	wOut = os.Stdout
 
@@ -58,7 +62,11 @@ func main() {
 			panic(err.Error())
 		}
 
-		connectionManager, conn := PLUS.NewConnectionManagerClient(packetConn, PLUS.RandomCAT(), udpAddr)
+		if Cat == 0 {
+			Cat = PLUS.RandomCAT()
+		}
+
+		connectionManager, conn := PLUS.NewConnectionManagerClient(packetConn, Cat, udpAddr)
 		go connectionManager.Listen()
 
 		handleConnection(conn)
@@ -66,50 +74,86 @@ func main() {
 }
 
 func handleConnection(conn *PLUS.Connection) {
-	buf := make([]byte, MaxPacketSize)
-	curAddr := conn.RemoteAddr()
+	recvBuf := make([]byte, MaxPacketSize)
+	sendBuf := make([]byte, 640)
+	closeChan := make(chan bool)
+	addrChan := make(chan net.Addr)
 
 	packetNo := uint64(0)
 
 	cat := conn.CAT()
 
+	recvAddr := ""
+
+	go func() {
+		curAddr := conn.RemoteAddr()
+
+		for {
+			now := time.Now().UnixNano()
+
+			tout := time.Now().Add(time.Duration(ReadTimeout) * time.Second)
+			conn.SetReadDeadline(tout)
+
+			n, addr, err := conn.ReadAndAddr(recvBuf)
+
+			if err != nil {
+				if err == PLUS.ErrReadTimeout {
+					writeString(wOut, fmt.Sprintf("TIMEOUT\t%d\t%d\t%s\n", cat, now, curAddr.String()))
+				} else {
+					writeString(wOut, fmt.Sprintf("ERROR\t%d\t%d\t%s\t%q\n", cat, now, curAddr.String(), err.Error()))
+				}
+				closeChan <- true
+				return
+			}
+
+			if curAddr.String() != addr.String() {
+				writeString(wOut, fmt.Sprintf("CHADDR\t%d\t%d\t%s\t%s\n", cat, now, curAddr.String(), addr.String()))
+				curAddr = addr
+				addrChan <- addr
+			}
+
+			recvString := string(recvBuf[:n])
+			writeString(wOut, fmt.Sprintf("DATA\t%d\t%d\t%s\t%q\n", cat, now, curAddr.String(), recvString))
+			writeString(wOut, fmt.Sprintf("RECV\t%d\t%d\t%s\t%d\n", cat, now, curAddr.String(), n))
+
+			if recvAddr == "" {
+				recvAddr = recvString
+			}
+
+			if recvAddr != recvString {
+				writeString(wOut, fmt.Sprintf("CHADDR_L\t%d\t%d\t%s\t%q\n", cat, now, curAddr.String(), recvString))
+				recvAddr = recvString
+			}
+		}
+	}()
+
+	curAddr := conn.RemoteAddr()
+	m := copy(sendBuf, []byte(curAddr.String()))
+
 	for {
 		now := time.Now().UnixNano()
 
-		binary.LittleEndian.PutUint64(buf, packetNo)
-
-		for i := 0; i < MaxPacketSize; i++ {
-			buf[i] = byte(rand.Intn(256))
-		}
-
-		n, err := conn.Write(buf)
-
-		writeString(wOut, fmt.Sprintf("SENT\t%d\t%d\t%s\t%d\n", cat, now, curAddr.String(), n))
-
-		tout := time.Now().Add(time.Duration(ReadTimeout) * time.Second)
-		conn.SetReadDeadline(tout)
-
-		n, addr, err := conn.ReadAndAddr(buf)
-
-		if err != nil {
-			if err == PLUS.ErrReadTimeout {
-				writeString(wOut, fmt.Sprintf("TIMEOUT\t%d\t%d\t%s\n", cat, now, curAddr.String()))
-			} else {
-				writeString(wOut, fmt.Sprintf("ERROR\t%d\t%d\t%s\t%q\n", cat, now, curAddr.String(), err.Error()))
-			}
+		select {
+		case _ = <- closeChan:
 			conn.Close()
 			return
-		}
-
-		if curAddr.String() != addr.String() {
-			writeString(wOut, fmt.Sprintf("CHADDR\t%d\t%d\t%s\t%s\n", cat, now, curAddr.String(), addr.String()))
+		case addr := <- addrChan:
 			curAddr = addr
+			m = copy(sendBuf, []byte(curAddr.String()))
+		default:
+
+			for i := 0; i < Burst; i++ {
+				n, err := conn.Write(sendBuf[:m])
+				if err == nil {
+					writeString(wOut, fmt.Sprintf("SENT\t%d\t%d\t%s\t%d\n", cat, now, curAddr.String(), n))
+				} else {
+					writeString(wOut, fmt.Sprintf("ERROR\t%d\t%d\t%s\t%s\n", cat, now, curAddr.String(), err.Error()))
+				}
+			}
+
+			packetNo++
+
+			time.Sleep(time.Duration(Sleep) * time.Second)
 		}
-
-		writeString(wOut, fmt.Sprintf("RECV\t%d\t%d\t%s\t%d\n", cat, now, curAddr.String(), n))
-
-		packetNo++
-
-		time.Sleep(time.Duration(Sleep) * time.Second)
 	}
 }
